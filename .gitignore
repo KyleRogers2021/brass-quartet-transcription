@@ -1,0 +1,3 @@
+baselines/onsets-and-frames/
+__pycache__/
+*.pt
