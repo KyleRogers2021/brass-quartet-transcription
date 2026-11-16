@@ -53,28 +53,42 @@ def window_starts(duration):
         t += S.WINDOW_HOP_SECONDS
 
 
-def merge_notes(notes, min_overlap=0.001):
-    """Join pieces of the same note found in overlapping windows.
+def decode_windows(window_boxes, eps=1e-4):
+    """Notes of a whole recording from the boxes of its overlapping windows.
 
-    Each instrument plays one note at a time, so two pieces with the same instrument
-    and pitch that overlap in time are the same note. Pieces that only touch are kept
-    apart, since a repeated note starts exactly where the previous one ends.
+    window_boxes: list of (t0, boxes) for every window, in time order.
+    Each window is trusted only for the middle half of its span (the first window
+    from the start, the last to the end), so the trusted parts tile the recording
+    without overlap and a note cut at a window's edge is never used. A note that
+    crosses the border between two trusted parts is cut there into two pieces,
+    which are joined only if both windows see it continuing across the border.
+    A repeated note that starts exactly where the previous one ends is therefore
+    never joined to it.
     """
-    merged = []
-    groups = {}
-    for n in notes:
-        groups.setdefault((n[3], n[2]), []).append(n)
-    for (inst, pitch), group in groups.items():
+    n = len(window_boxes)
+    quarter = S.CLIP_SECONDS / 4
+    pieces = {}
+    for i, (t0, boxes) in enumerate(window_boxes):
+        lo = float('-inf') if i == 0 else t0 + quarter
+        hi = float('inf') if i == n - 1 else t0 + 3 * quarter
+        for on, off, pitch, inst in boxes_to_notes(boxes, t0):
+            a, b = max(on, lo), min(off, hi)
+            if b - a <= eps:          # nothing left (or only rounding) in the trusted part
+                continue
+            pieces.setdefault((inst, pitch), []).append([a, b, on < lo - eps, off > hi + eps])
+    notes = []
+    for (inst, pitch), group in pieces.items():
         group.sort()
-        cur_on, cur_off = group[0][0], group[0][1]
-        for on, off, _, _ in group[1:]:
-            if on < cur_off - min_overlap:
-                cur_off = max(cur_off, off)
+        cur = group[0]
+        for nxt in group[1:]:
+            joins = abs(nxt[0] - cur[1]) <= eps and cur[3] and nxt[2]
+            if joins:
+                cur = [cur[0], nxt[1], cur[2], nxt[3]]
             else:
-                merged.append((cur_on, cur_off, pitch, inst))
-                cur_on, cur_off = on, off
-        merged.append((cur_on, cur_off, pitch, inst))
-    return sorted(merged)
+                notes.append((cur[0], cur[1], pitch, inst))
+                cur = nxt
+        notes.append((cur[0], cur[1], pitch, inst))
+    return sorted(notes)
 
 
 def write_yolo(path, boxes):

@@ -1,6 +1,6 @@
 r"""
 Round-trip check of the detector's label geometry: real CocoChorales notes ->
-overlapping 10.24 s windows -> YOLO box label files -> back to notes -> merged
+overlapping 10.24 s windows -> YOLO box label files -> back to notes, joined
 across windows. Every note should come back exactly; anything else is a bug in
 the conversion, found before any training data is generated.
 
@@ -21,8 +21,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import settings as S                                                   # noqa: E402
-from boxes import (notes_to_boxes, boxes_to_notes, window_starts, merge_notes,   # noqa: E402
-                   write_yolo, read_yolo)
+from boxes import notes_to_boxes, window_starts, decode_windows, write_yolo, read_yolo   # noqa: E402
 
 COCO_LABELS = r'R:\datasets\cocochorales\labels'
 COCO_SPLITS = r'R:\splits\cocochorales_brass'
@@ -49,7 +48,7 @@ def main():
         tracks = f.read().split()
     tracks = random.Random(0).sample(tracks, min(a.tracks, len(tracks)))
 
-    total = exact = 0
+    total = exact = extra = 0
     problems = []
     per_clip, slivers, dup_boxes, clips = [], 0, 0, 0
     px_w = S.CLIP_SECONDS / S.FRAMES
@@ -58,18 +57,17 @@ def main():
         for track in tracks:
             notes = read_notes(os.path.join(COCO_LABELS, a.split, f'{track}.tsv'))
             duration = max(n[1] for n in notes) + 1.0
-            recovered = []
+            windows = []
             for t0 in window_starts(duration):
                 boxes = notes_to_boxes(notes, t0)
                 write_yolo(label_file, boxes)              # through the real file format
-                back = read_yolo(label_file)
-                recovered += boxes_to_notes(back, t0)
+                windows.append((t0, read_yolo(label_file)))
                 clips += 1
                 per_clip.append(len(boxes))
                 slivers += sum(b[3] * S.CLIP_SECONDS < 2 * px_w for b in boxes)
                 keys = [(round(b[1], 4), round(b[2], 4), round(b[3], 4)) for b in boxes]
                 dup_boxes += len(keys) - len(set(keys))
-            merged = merge_notes(recovered)
+            merged = decode_windows(windows)
             total += len(notes)
             remaining = list(merged)
             for n in sorted(notes):
@@ -80,13 +78,15 @@ def main():
                 else:
                     exact += 1
                     remaining.pop(hit)
+            extra += len(remaining)
             if remaining and len(problems) < 10:
                 problems.append((track, ('extra', remaining[0])))
 
     lines = [f'Round-trip check on {len(tracks)} CocoChorales {a.split} tracks ({clips} clips of '
              f'{S.CLIP_SECONDS:.2f} s, windows every {S.WINDOW_HOP_SECONDS:.2f} s)',
              f'  notes recovered exactly (pitch, instrument, onset and offset within 1 ms): '
-             f'{exact} of {total} ({exact / max(total, 1):.4%})']
+             f'{exact} of {total} ({exact / max(total, 1):.4%})',
+             f'  extra notes that are not in the answer key: {extra}']
     if problems:
         lines.append('  first problems (track, note):')
         lines += [f'    {t}  {n}' for t, n in problems]
@@ -95,7 +95,7 @@ def main():
               f'  slivers under 2 px wide (notes cut at a clip edge): {slivers} '
               f'({slivers / max(pc.sum(), 1):.2%} of boxes)',
               f'  identical boxes from exact unisons: {dup_boxes} ({dup_boxes / max(pc.sum(), 1):.2%} of boxes)',
-              'ROUND TRIP PASSED' if exact == total else 'ROUND TRIP FAILED: see problems above']
+              'ROUND TRIP PASSED' if exact == total and extra == 0 else 'ROUND TRIP FAILED: see problems above']
     report = '\n'.join(lines)
     print(report)
     os.makedirs(os.path.dirname(OUT), exist_ok=True)
