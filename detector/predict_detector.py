@@ -15,6 +15,10 @@ Writes:
       every box down to confidence 0.05 with its confidence, so other cutoffs can be
       tried later without running the detector again
 
+The HCQT harmonics are read from the training dataset's settings.json (found via
+the run's args.yaml), so a model is always run with the HCQT it was trained on.
+Datasets made before settings.json existed use harmonics (1, 2, 3).
+
 Run in the yolo environment (needs: pip install librosa soundfile):
     python R:\code\detector\predict_detector.py --run medium_v1
     add --weights epoch5 (or last, epoch10, ...) to use another saved checkpoint
@@ -52,7 +56,21 @@ def load_audio(path):
     return audio
 
 
-def window_images(audio):
+def run_harmonics(run_dir):
+    """The HCQT harmonics of the dataset this run was trained on."""
+    data_yaml = None
+    with open(os.path.join(run_dir, 'args.yaml')) as f:
+        for line in f:
+            if line.startswith('data:'):
+                data_yaml = line.split(':', 1)[1].strip().strip('\'"')
+    settings = os.path.join(os.path.dirname(data_yaml), 'settings.json') if data_yaml else ''
+    if settings and os.path.isfile(settings):
+        with open(settings) as f:
+            return tuple(json.load(f)['harmonics']), data_yaml
+    return (1, 2, 3), data_yaml
+
+
+def window_images(audio, harmonics):
     """(t0, image) for every window; the image channels are reversed to BGR order, which
     is how Ultralytics expects numpy input (training images were read from PNG the same way)."""
     n = int(S.CLIP_SECONDS * S.SAMPLE_RATE)
@@ -62,7 +80,7 @@ def window_images(audio):
         seg = audio[start:start + n]
         if len(seg) < n:
             seg = np.pad(seg, (0, n - len(seg)))
-        out.append((t0, np.ascontiguousarray(hcqt_image(seg)[:, :, ::-1])))
+        out.append((t0, np.ascontiguousarray(hcqt_image(seg, harmonics)[:, :, ::-1])))
     return out
 
 
@@ -76,6 +94,8 @@ def main():
 
     from ultralytics import YOLO
     model = YOLO(os.path.join(RUNS, a.run, 'weights', f'{a.weights}.pt'))
+    harmonics, data_yaml = run_harmonics(os.path.join(RUNS, a.run))
+    print(f'Trained on {data_yaml}; HCQT harmonics {harmonics}')
     name = f'detector_{a.run}' + ('' if a.weights == 'best' else f'_{a.weights}') + \
            ('' if a.conf == 0.25 else f'_conf{a.conf:g}')
     out_dir = os.path.join(PREDICTIONS, name, 'choralebricks')
@@ -89,7 +109,7 @@ def main():
     total_notes = 0
     for i, item in enumerate(items, 1):
         audio = load_audio(os.path.join(CB_AUDIO, item, 'mix.wav'))
-        windows = window_images(audio)
+        windows = window_images(audio, harmonics)
         results = model.predict([img for _, img in windows], imgsz=640, conf=SAVE_CONF,
                                 verbose=False)
         raw, kept = [], []
