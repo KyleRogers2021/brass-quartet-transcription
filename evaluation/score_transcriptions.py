@@ -36,6 +36,10 @@ Writes to the output folder:
     notes_reference.csv     every answer-key note: found? given to whom? how far off?
     notes_extra.csv         every predicted note that matched nothing
 
+Note start tolerance: 50 ms by default (the standard). --onset-tol 100 scores with
+100 ms instead (onsets AND the start rule inside note_offsets); give such runs their
+own --out folder, e.g. ..._tol100. Frame scores do not use it.
+
 Run from the Miniforge Prompt (oaf environment):
     python R:\code\evaluation\score_transcriptions.py --selftest
     python R:\code\evaluation\score_transcriptions.py --pred <prediction folder> --name <run name>
@@ -57,7 +61,8 @@ from mir_eval.util import midi_to_hz
 
 INSTRUMENTS = ['trumpet', 'horn', 'trombone', 'tuba']
 NAMES = INSTRUMENTS + ['other']      # predictions may also use 4 = other
-ONSET_TOL = 0.05
+ONSET_TOL = 0.05          # note start tolerance (s); --onset-tol changes it for a run
+UNISON_TOL = 0.05         # fixed, for the unison column only
 OFFSET_RATIO = 0.2
 OFFSET_MIN = 0.05
 FRAME_HOP = 0.01
@@ -181,7 +186,7 @@ def score_track(args):
         gap = (on - last[1]) * 1000 if last is not None else ''
         prev[inst] = ref[k]
         unison = bool(((ref[:, 2] == p) & (ref[:, 3] != inst) &
-                       (ref[:, 0] <= on + ONSET_TOL) & (ref[:, 1] > on)).any())
+                       (ref[:, 0] <= on + UNISON_TOL) & (ref[:, 1] > on)).any())
         if k in found:
             given = INSTRUMENTS[int(inst)] if has_inst else 'found'
             err = round((est[found[k], 0] - on) * 1000, 1)
@@ -203,7 +208,14 @@ def score_track(args):
 
 
 # ---------------------------------------------------------------- whole run
-def run(pred_dir, ref_dir, list_path, out_dir, name, quiet=False):
+def set_onset_tol(seconds):
+    """Set the note start tolerance in this process (also run in every worker)."""
+    global ONSET_TOL
+    ONSET_TOL = seconds
+
+
+def run(pred_dir, ref_dir, list_path, out_dir, name, quiet=False, onset_tol=0.05):
+    set_onset_tol(onset_tol)
     with open(list_path) as f:
         tracks = f.read().split()
     missing = [t for t in tracks if not os.path.exists(os.path.join(pred_dir, f'{t}.tsv'))]
@@ -216,7 +228,7 @@ def run(pred_dir, ref_dir, list_path, out_dir, name, quiet=False):
             for t in tracks]
     t0 = time.time()
     results = []
-    with Pool(WORKERS) as pool:
+    with Pool(WORKERS, initializer=set_onset_tol, initargs=(onset_tol,)) as pool:
         for k, r in enumerate(pool.imap(score_track, jobs, chunksize=20), 1):
             results.append(r)
             if not quiet and (k % 500 == 0 or k == len(jobs)):
@@ -225,6 +237,8 @@ def run(pred_dir, ref_dir, list_path, out_dir, name, quiet=False):
     has_inst = all(r['has_inst'] for r in results)
     levels = ['agnostic', 'aware'] if has_inst else ['agnostic']
     lines = [f'Scores for {name}: {len(results)} tracks', '']
+    if abs(onset_tol - 0.05) > 1e-9:
+        lines[-1:] = [f'Note start tolerance: {onset_tol * 1000:.0f} ms (standard is 50 ms)', '']
     table = []
     for avg in ('per_track', 'pooled'):
         lines.append(f'{"Per-track average" if avg == "per_track" else "Pooled"}:')
@@ -404,10 +418,13 @@ if __name__ == '__main__':
     ap.add_argument('--list', default=DEFAULT_LIST)
     ap.add_argument('--out')
     ap.add_argument('--selftest', action='store_true')
+    ap.add_argument('--onset-tol', type=float, default=50,
+                    help='note start tolerance in ms (default 50, the standard; e.g. 100)')
     a = ap.parse_args()
     if a.selftest:
         selftest(a.ref, a.list, DEFAULT_RESULTS)
     elif a.pred and a.name:
-        run(a.pred, a.ref, a.list, a.out or os.path.join(DEFAULT_RESULTS, a.name, 'scores'), a.name)
+        run(a.pred, a.ref, a.list, a.out or os.path.join(DEFAULT_RESULTS, a.name, 'scores'), a.name,
+            onset_tol=a.onset_tol / 1000)
     else:
         ap.error('give --pred and --name, or --selftest')

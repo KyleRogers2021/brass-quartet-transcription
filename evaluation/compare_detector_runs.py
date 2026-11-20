@@ -21,6 +21,8 @@ Default settings (three seeds each):
   C1 p3m12  medium_p3m12_v1, _seed1, _seed2                       (shift -12..+3)
   C2 h05    medium_h05_v1, _seed1, _seed2                         (harmonics 0.5 1 2)
 Other groups:  --group "name=run1,run2,run3"  (repeatable; the first is the baseline)
+100 ms scoring: --tol 100 reads the folders scored with --onset-tol 100
+(detector_<run>_choralebricks_tol100) and writes compare_detector_runs_tol100.txt
 
 Run from the Miniforge Prompt (oaf environment):
     python R:\code\evaluation\compare_detector_runs.py
@@ -45,8 +47,8 @@ DEFAULT_GROUPS = [
 COLUMNS = ['agnostic', 'aware'] + NAMES + ['inst. avg', 'naming', 'register']
 
 
-def run_scores(run, guess):
-    folder = os.path.join(RESULTS, f'detector_{run}_choralebricks')
+def run_scores(run, guess, suffix=''):
+    folder = os.path.join(RESULTS, f'detector_{run}_choralebricks{suffix}')
     if not os.path.isfile(os.path.join(folder, 'results.csv')):
         return None
     out = {}
@@ -70,7 +72,9 @@ def run_scores(run, guess):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--group', action='append', help='"name=run1,run2,run3"')
+    ap.add_argument('--tol', type=int, default=50, help='note start tolerance the runs were scored with, ms')
     a = ap.parse_args()
+    suffix = '' if a.tol == 50 else f'_tol{a.tol}'
     groups = DEFAULT_GROUPS if not a.group else \
         [(g.split('=', 1)[0], g.split('=', 1)[1].split(',')) for g in a.group]
 
@@ -78,11 +82,11 @@ def main():
     guess = build_guesser()
     lines, rows, stats = [], [], {}
     head = f'{"run":<26}' + ''.join(f'{c:>10}' for c in COLUMNS)
-    lines += ['ChoraleBricks, per-track note F1 (onset within 50 ms); naming/register as shares', '', head]
+    lines += [f'ChoraleBricks, per-track note F1 (onset within {a.tol} ms); naming/register as shares', '', head]
     for name, runs in groups:
         vals = []
         for run in runs:
-            s = run_scores(run, guess)
+            s = run_scores(run, guess, suffix)
             if s is None:
                 lines.append(f'{run:<26}  (not scored yet: no results folder)')
                 continue
@@ -117,13 +121,13 @@ def main():
             lines.append(f'{name:<26}' + ''.join(f'{m:>10}' for m in marks))
     text = '\n'.join(lines)
     print(text)
-    with open(os.path.join(RESULTS, 'compare_detector_runs.txt'), 'w') as f:
+    with open(os.path.join(RESULTS, f'compare_detector_runs{suffix}.txt'), 'w') as f:
         f.write(text + '\n')
-    with open(os.path.join(RESULTS, 'compare_detector_runs.csv'), 'w', newline='') as f:
+    with open(os.path.join(RESULTS, f'compare_detector_runs{suffix}.csv'), 'w', newline='') as f:
         w = csv.writer(f)
         w.writerow(['setting', 'run'] + COLUMNS)
         w.writerows(rows)
-    print(f'\nSaved to {RESULTS}\\compare_detector_runs.txt')
+    print(f'\nSaved to {RESULTS}\\compare_detector_runs{suffix}.txt')
     print('COMPARISON DONE')
 
 

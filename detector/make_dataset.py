@@ -1,6 +1,6 @@
 r"""
-Build the detector's training data: augmented CocoChorales clips -> 3-channel HCQT
-images (PNG) + YOLO label files, in the folder layout Ultralytics expects.
+Build the detector's training data: augmented CocoChorales clips -> 3- or 4-channel
+HCQT images + YOLO label files, in the folder layout Ultralytics expects.
 
 Clips come from the same augmented loader the Onsets and Frames experiments used
 (CocoChoralesBrassAug: stem subsets + pitch shift by resampling), so the
@@ -9,7 +9,15 @@ settings.py; validation clips are plain mixes (no augmentation), as for O&F.
 
 Each image: width = 640 columns of 16 ms (10.24 s), height = MIDI MIDI_LO-MIDI_HI at
 4 CQT bins per semitone, stretched 2x to 640 rows (highest pitch at the top);
-channels = HCQT harmonics 1, 2, 3; log magnitude, 80 dB range, 0-255.
+channels = HCQT harmonics (default 1, 2, 3); log magnitude, 80 dB range, 0-255.
+3 harmonics -> PNG (RGB = the harmonics in order).
+4 harmonics -> multi-page grayscale TIFF, one page per harmonic in the order given,
+plus 'channels: 4' in data.yaml. Ultralytics stacks the pages as channels in page
+order and does no BGR/RGB flip for 4 channels, so the model sees the harmonics in
+exactly the order given (predict_detector.py feeds them the same way). With
+pretrained weights, the first 3 input channels get the pretrained first-layer
+filters and the 4th starts random; so list the new harmonic last
+(--harmonics 1 2 3 0.5) to keep 1, 2, 3 on the same filters as the 3-channel runs.
 
 Runs on the CPU (several processes), so the GPU stays free.
 
@@ -19,6 +27,7 @@ folder name automatically, so the name always says what is inside:
     --name medium                          -> medium_p9m9
     --name medium --shift-up 3 --shift-down 12          -> medium_p3m12
     --name medium --harmonics 0.5 1 2                    -> medium_p9m9_h0.5-1-2
+    --name medium --harmonics 1 2 3 0.5                  -> medium_p9m9_h1-2-3-0.5 (4 channels)
 Low-frequency attenuation (training clips only; off by default):
     --lowcut-prob 0.5     share of training clips whose bass is turned down
     --lowcut-freq 60 250  corner frequency range in Hz (random per clip)
@@ -83,7 +92,7 @@ def low_shelf(audio, corner_hz, cut_db, sr=S.SAMPLE_RATE):
 
 def hcqt_image(audio, harmonics=None):
     """640 x 640 x 3 uint8 image of a 10.24 s clip (column k covers [16k, 16k + 16) ms).
-    harmonics: the three HCQT harmonics (default settings.HARMONICS)."""
+    harmonics: the HCQT harmonics, 3 or 4 (default settings.HARMONICS)."""
     harmonics = S.HARMONICS if harmonics is None else tuple(harmonics)
     import librosa
     # librosa centers frame k on sample k*HOP; drop half a hop so it is centered on (k + 0.5)*HOP
@@ -95,13 +104,38 @@ def hcqt_image(audio, harmonics=None):
         c = np.abs(librosa.cqt(y, sr=S.SAMPLE_RATE, hop_length=S.HOP, fmin=fmin * h, n_bins=n_bins,
                                bins_per_octave=12 * S.BINS_PER_SEMITONE))[:, :S.FRAMES]
         chans.append(c)
-    mag = np.stack(chans)                                          # (3, bins, frames)
+    mag = np.stack(chans)                                          # (channels, bins, frames)
     db = 20 * np.log10(np.maximum(mag, 1e-10))
     db = np.clip(db - db.max(), -DB_RANGE, 0)                      # same reference for all channels
     img = ((db + DB_RANGE) / DB_RANGE * 255).round().astype(np.uint8)
     img = img[:, ::-1, :]                                          # highest pitch at the top
     img = np.repeat(img, S.IMAGE_HEIGHT // n_bins, axis=1)         # 320 -> 640 rows
-    return np.transpose(img, (1, 2, 0))                            # (640, 640, 3)
+    return np.transpose(img, (1, 2, 0))                            # (640, 640, channels)
+
+
+def image_ext(harmonics):
+    return '.png' if len(harmonics) == 3 else '.tif'
+
+
+def save_image(img, path):
+    """3 channels: RGB PNG. 4 channels: one grayscale TIFF page per channel, in order."""
+    if img.shape[2] == 3:
+        Image.fromarray(img).save(path)
+    else:
+        pages = [Image.fromarray(np.ascontiguousarray(img[:, :, c])) for c in range(img.shape[2])]
+        pages[0].save(path, save_all=True, append_images=pages[1:], compression='tiff_adobe_deflate')
+
+
+def load_image(path):
+    """(H, W, channels) uint8, channels in harmonic order (inverse of save_image)."""
+    im = Image.open(path)
+    if path.lower().endswith('.png'):
+        return np.asarray(im.convert('RGB'))
+    pages = []
+    for k in range(im.n_frames):
+        im.seek(k)
+        pages.append(np.asarray(im.convert('L')))
+    return np.stack(pages, axis=2)
 
 
 def clip_notes(track, split, info):
@@ -137,7 +171,7 @@ def init_worker(split, augment, seed, shift_range=(-S.PITCH_SHIFT_MAX, S.PITCH_S
 def make_one(job):
     track, split, k, img_dir, lab_dir = job
     name = f'{track}_{k}'
-    img_path, lab_path = os.path.join(img_dir, name + '.png'), os.path.join(lab_dir, name + '.txt')
+    img_path, lab_path = os.path.join(img_dir, name + image_ext(_harmonics)), os.path.join(lab_dir, name + '.txt')
     if os.path.exists(img_path) and os.path.exists(lab_path):
         return name, None                                          # already done (resuming)
     # a reproducible random state per clip, whatever the process or order
@@ -149,7 +183,7 @@ def make_one(job):
             info['lowcut'] = (float(r.uniform(_lowcut[1], _lowcut[2])), float(r.uniform(_lowcut[3], _lowcut[4])))
             audio = low_shelf(audio, *info['lowcut'])
     boxes = notes_to_boxes(clip_notes(track, split, info), 0.0, min_width_s=S.CLIP_SECONDS / S.FRAMES)
-    Image.fromarray(hcqt_image(audio, _harmonics)).save(img_path)
+    save_image(hcqt_image(audio, _harmonics), img_path)
     write_yolo(lab_path, boxes)
     return name, info
 
@@ -160,8 +194,8 @@ def preview(img_dir, lab_dir, names, out_dir, harmonics=S.HARMONICS):
     os.makedirs(out_dir, exist_ok=True)
     ch = list(harmonics).index(1)
     for name in names:
-        img = Image.open(os.path.join(img_dir, name + '.png')).convert('RGB')
-        gray = Image.fromarray(255 - np.asarray(img)[:, :, ch]).convert('RGB')   # harmonic 1, dark = loud
+        img = load_image(os.path.join(img_dir, name + image_ext(harmonics)))
+        gray = Image.fromarray(255 - img[:, :, ch]).convert('RGB')                # harmonic 1, dark = loud
         d = ImageDraw.Draw(gray)
         with open(os.path.join(lab_dir, name + '.txt')) as f:
             for line in f:
@@ -211,8 +245,8 @@ def main():
                     help=f'largest upward pitch shift in semitones (default {S.PITCH_SHIFT_MAX})')
     ap.add_argument('--shift-down', type=int, default=S.PITCH_SHIFT_MAX,
                     help=f'largest downward pitch shift in semitones (default {S.PITCH_SHIFT_MAX})')
-    ap.add_argument('--harmonics', type=float, nargs=3, default=list(S.HARMONICS),
-                    help=f'the three HCQT harmonics (default {" ".join(map(str, S.HARMONICS))})')
+    ap.add_argument('--harmonics', type=float, nargs='+', default=list(S.HARMONICS),
+                    help=f'3 or 4 HCQT harmonics, must include 1 (default {" ".join(map(str, S.HARMONICS))})')
     ap.add_argument('--lowcut-prob', type=float, default=0.0,
                     help='share of training clips with low-frequency attenuation (default 0 = off)')
     ap.add_argument('--lowcut-freq', type=float, nargs=2, default=[60, 250], help='corner range, Hz')
@@ -221,6 +255,8 @@ def main():
 
     lowcut = (a.lowcut_prob, *a.lowcut_freq, *a.lowcut_db) if a.lowcut_prob > 0 else None
     harmonics = tuple(int(h) if float(h).is_integer() else h for h in a.harmonics)
+    if len(harmonics) not in (3, 4) or 1 not in harmonics or len(set(harmonics)) != len(harmonics):
+        ap.error('--harmonics needs 3 or 4 different values, including 1')
     shift_range = (-a.shift_down, a.shift_up)
     tag = f'_p{a.shift_up}m{a.shift_down}'
     if harmonics != tuple(S.HARMONICS):
@@ -251,7 +287,10 @@ def main():
                               shift_range, harmonics)
 
     with open(os.path.join(root, 'data.yaml'), 'w') as f:
-        f.write(f'path: {root}\ntrain: images/train\nval: images/val\nnames:\n')
+        f.write(f'path: {root}\ntrain: images/train\nval: images/val\n')
+        if len(harmonics) != 3:
+            f.write(f'channels: {len(harmonics)}\n')
+        f.write('names:\n')
         for i, n in enumerate(S.INSTRUMENTS):
             f.write(f'  {i}: {n}\n')
         f.write(f'# settings: MIDI {S.MIDI_LO}-{S.MIDI_HI}, harmonics {harmonics}, '

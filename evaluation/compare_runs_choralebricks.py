@@ -25,7 +25,10 @@ listed and left out.
 
 Run from the Miniforge Prompt (oaf environment):
     python R:\code\evaluation\compare_runs_choralebricks.py
+    python R:\code\evaluation\compare_runs_choralebricks.py --tol 100   (100 ms note start
+        tolerance; kept apart in R:\experiments\results\compare_runs_choralebricks_tol100)
 """
+import argparse
 import csv
 import glob
 import os
@@ -73,6 +76,9 @@ def get(table, measure, level):
             return p, r, f1
 
 
+TOL_MS = 50
+
+
 def score_run(name, folder, guess):
     """Scores of one run's final predictions, as a dict of MEASURES (cached on disk)."""
     out = os.path.join(OUT, name)
@@ -82,7 +88,8 @@ def score_run(name, folder, guess):
             row = next(csv.DictReader(f))
         return {k: float(row[k]) for k in MEASURES}
     print(f'  scoring {name} ...')
-    table = run(folder, REF, ALL_LIST, out, f'O&F {name} / ChoraleBricks all', quiet=True)
+    table = run(folder, REF, ALL_LIST, out, f'O&F {name} / ChoraleBricks all', quiet=True,
+                onset_tol=TOL_MS / 1000)
     agn, aw = get(table, 'note', 'agnostic'), get(table, 'note', 'aware')
     with open(os.path.join(out, 'notes_reference.csv'), newline='') as f:
         notes = list(csv.DictReader(f))
@@ -124,6 +131,12 @@ HEADER = (f'  {"":<44}{"agn F1":>8}{"aware P":>9}{"aware R":>9}{"aware F1":>10}'
 
 
 def main():
+    global OUT, TOL_MS
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--tol', type=int, default=50, help='note start tolerance in ms (default 50)')
+    TOL_MS = ap.parse_args().tol
+    if TOL_MS != 50:
+        OUT = OUT + f'_tol{TOL_MS}'
     with open(ALL_LIST) as f:
         n_items = len(f.read().split())
     guess = build_guesser()
@@ -144,7 +157,8 @@ def main():
         sys.exit('No finished O&F predictions on ChoraleBricks found.')
     types = sorted(by_type, key=type_order)
 
-    lines = [f'Onsets and Frames on ChoraleBricks (all {n_items} items, per-item average note scores)',
+    lines = [f'Onsets and Frames on ChoraleBricks (all {n_items} items, per-item average note scores, '
+             f'note start within {TOL_MS} ms)',
              '',
              '1. Each type: mean over its runs; spread = aware F1 standard deviation and min-max',
              HEADER + f'{"aware F1 spread":>24}{"runs":>6}']

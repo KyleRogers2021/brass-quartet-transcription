@@ -4,7 +4,7 @@ same format as the baselines' predictions, so the existing scoring code scores
 it exactly like them.
 
 Each recording is split into overlapping 10.24 s windows (every 5.12 s), each
-window becomes the same 3-channel HCQT image as in training, the detector finds
+window becomes the same HCQT image as in training (3 or 4 channels), the detector finds
 the note boxes, and decode_windows (verified exact in check_roundtrip.py) joins
 them into notes. Boxes below the confidence cutoff (default 0.25, Ultralytics'
 standard, not tuned on ChoraleBricks) are dropped.
@@ -71,8 +71,11 @@ def run_harmonics(run_dir):
 
 
 def window_images(audio, harmonics):
-    """(t0, image) for every window; the image channels are reversed to BGR order, which
-    is how Ultralytics expects numpy input (training images were read from PNG the same way)."""
+    """(t0, image) for every window, channels arranged as Ultralytics saw them in training.
+    3 channels: reversed to BGR, which is how Ultralytics expects numpy input (it flips them
+    back to RGB, as it does for the PNG training images). 4 channels: Ultralytics does no
+    flip for 4 channels, in training (TIFF pages stacked in order) or here, so they stay in
+    harmonic order."""
     n = int(S.CLIP_SECONDS * S.SAMPLE_RATE)
     out = []
     for t0 in window_starts(len(audio) / S.SAMPLE_RATE):
@@ -80,7 +83,8 @@ def window_images(audio, harmonics):
         seg = audio[start:start + n]
         if len(seg) < n:
             seg = np.pad(seg, (0, n - len(seg)))
-        out.append((t0, np.ascontiguousarray(hcqt_image(seg, harmonics)[:, :, ::-1])))
+        img = hcqt_image(seg, harmonics)
+        out.append((t0, np.ascontiguousarray(img[:, :, ::-1] if img.shape[2] == 3 else img)))
     return out
 
 
