@@ -28,7 +28,8 @@ Steps
        the first note's, i.e. the pickup; --phrase-pickup sets it), if the hold is long
        enough to contain them (written rests played in time stay). Notes held into the
        gap end where the next phrase starts (a written half note + rest comes out as a
-       dotted half) and get a fermata. The last chord ends where a next phrase would
+       dotted half); --fermatas marks them with a fermata (off by default: the
+       original scores have none, the holds are the players'). The last chord ends where a next phrase would
        start (the final bar completes the pickup bar). Own heuristic, not a published
        method; madmom's own bar positions (downbeat tracking and its raw downbeat
        activation) were checked for this and do not recover after such holds.
@@ -76,6 +77,7 @@ Options
     --grid       8 or 16: shortest note value (default 16)
     --gap-fill   fill silences shorter than this many beats (default 0.5; 0 = off)
     --no-phrase-ends  switch off the phrase-end handling
+    --fermatas   mark notes held longer than written at phrase ends with a fermata (default off)
     --no-beat-offset  keep note starts where they fall against the tracked beats
     --phrase-pickup   beats before the bar line where phrases start (default: the pickup)
     --notes      use a note list (.tsv) instead of the detector: ChoraleBricks labels
@@ -521,6 +523,8 @@ def main():
     ap.add_argument('--gap-fill', type=float, default=GAP_FILL,
                     help=f'fill silences shorter than this many beats (default {GAP_FILL}; 0 = off)')
     ap.add_argument('--no-phrase-ends', action='store_true', help='switch off the phrase-end handling')
+    ap.add_argument('--fermatas', action='store_true',
+                    help='mark notes held longer than written at phrase ends with a fermata')
     ap.add_argument('--phrase-pickup', type=float,
                     help='beats before the bar line where phrases start (default: the pickup)')
     ap.add_argument('--no-beat-offset', action='store_true',
@@ -604,6 +608,8 @@ def main():
     breaks = []
     if not a.no_phrase_ends:
         on, off, fermata, breaks = phrase_ends(on, off, cls, bar1, pickup, beats_per_bar, a.phrase_pickup)
+        if not a.fermatas:
+            fermata[:] = False
     filled = 0
     if a.gap_fill > 0:                                    # after the phrase ends: also closes gaps left there
         off, filled = fill_gaps(on, off, cls, a.gap_fill)
